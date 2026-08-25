@@ -31,6 +31,8 @@ const lineShifts = {
 // quando a leitura do banco estiver pronta.
 let machines = [];
 let selectedMachineId = null;
+let filtrosProntos = false; // garante que os filtros em cascata (Linha→Máquina)
+                             // só são montados depois que a 1ª carga real chegar
 
 async function carregarMaquinas() {
 
@@ -88,8 +90,35 @@ async function carregarMaquinas() {
             : `<span class="dot-live"></span> CONECTADO AO SUPABASE — NENHUMA MÁQUINA NA TABELA AINDA`;
     }
 
-    renderAll();
-    checkAlarmState();
+    // Mostra quando foi a última vez que os dados realmente atualizaram —
+    // se esse horário ficar "parado" enquanto o relógio do sistema avança,
+    // é sinal de que a aba entrou em segundo plano (ver listeners no fim do arquivo).
+    const lastUpdatePill = document.getElementById('last-update-pill');
+    if(lastUpdatePill){
+        lastUpdatePill.textContent = `última atualização: ${new Date().toLocaleTimeString('pt-BR')}`;
+    }
+
+    // Os filtros em cascata (Supervisor > Paradas por Linha) dependem de saber
+    // quais máquinas existem — na 1ª carga (script inicia com machines=[])
+    // eles ficavam montados vazios e nunca mais se corrigiam sozinhos. Agora
+    // só montamos eles quando finalmente existe dado de verdade.
+    try{
+        if(!filtrosProntos && machines.length > 0 && typeof initParetoFilters === 'function'){
+            initParetoFilters();
+            filtrosProntos = true;
+        }
+
+        renderAll();
+        checkAlarmState();
+    } catch(renderErr){
+        // Se o desenho da tela falhar por algum motivo, mostra o erro na tela
+        // em vez de travar em silêncio — assim dá pra saber exatamente o que
+        // aconteceu sem precisar abrir o console do navegador.
+        console.error('Erro ao renderizar o painel:', renderErr);
+        if(pill){
+            pill.innerHTML = `<span class="dot-live"></span> ERRO AO ATUALIZAR A TELA: ${renderErr.message}`;
+        }
+    }
 }
 
 const statusLabel = { run:'Rodando', stop:'Parada', setup:'Setup' };
@@ -140,34 +169,35 @@ function beep(){
   if(!ctx) return;
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
+  const now = ctx.currentTime;
+
+  // Sirene "vai-e-vem" (tipo ambulância) — alterna entre dois tons fixos,
+  // em vez de deslizar suavemente entre as frequências. Fica muito mais
+  // reconhecível como alarme de verdade do que o efeito de "onda" de antes.
   osc.type = 'square';
-  osc.frequency.value = 880;
-  gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.18, ctx.currentTime + 0.02);
-  gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+  const toneAlto = 950, toneBaixo = 700;
+  const passo = 0.18; // troca de tom a cada 0.18s
+  const passos = 8;   // 8 passos × 0.18s ≈ 1.44s de sirene por ciclo
+  for(let i = 0; i < passos; i++){
+    osc.frequency.setValueAtTime(i % 2 === 0 ? toneAlto : toneBaixo, now + i*passo);
+  }
+  const duracaoTotal = passos * passo;
+
+  // Volume igual ao que já estava (0.9, bem alto).
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.9, now + 0.03);
+  gain.gain.setValueAtTime(0.9, now + duracaoTotal - 0.05);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duracaoTotal);
+
   osc.connect(gain).connect(ctx.destination);
-  osc.start();
-  osc.stop(ctx.currentTime + 0.4);
-  // segundo bipe, mais curto, pra soar como alarme e não como notificação comum
-  setTimeout(()=>{
-    if(!audioCtx) return;
-    const osc2 = ctx.createOscillator();
-    const gain2 = ctx.createGain();
-    osc2.type = 'square';
-    osc2.frequency.value = 660;
-    gain2.gain.setValueAtTime(0.0001, ctx.currentTime);
-    gain2.gain.exponentialRampToValueAtTime(0.18, ctx.currentTime + 0.02);
-    gain2.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
-    osc2.connect(gain2).connect(ctx.destination);
-    osc2.start();
-    osc2.stop(ctx.currentTime + 0.3);
-  }, 220);
+  osc.start(now);
+  osc.stop(now + duracaoTotal + 0.05);
 }
 
 function startAlarm(){
   if(alarmInterval) return;
   beep();
-  alarmInterval = setInterval(beep, 4000);
+  alarmInterval = setInterval(beep, 2000); // mesmo intervalo de repetição de antes
 }
 
 function stopAlarm(){
@@ -406,24 +436,40 @@ function renderLineBars(){
 // Pareto de OEE por Linha: ordenado da PIOR pra melhor, pra destacar onde
 // focar primeiro — mesmo estilo visual usado nas paradas.
 function renderOeeByLine(){
-  const lines = lineProduction();
   const el = document.getElementById('oee-bars');
+  if(!el) return;
+
+  // Média de OEE de hoje por linha, calculada a partir da tabela real oee_hourly
+  // (o EGA já calcula o OEE hora a hora — a gente só agrupa por linha e tira a média).
+  const porLinha = {};
+  liveOeeHourly.forEach(r => {
+    if(r.oee == null) return;
+    (porLinha[r.line] = porLinha[r.line] || []).push(Number(r.oee));
+  });
 
   const dados = Object.keys(lineTargets).map(name=>{
-    const val = lines[name] || 0;
-    const meta = lineTargets[name];
-    const perc = Math.min(100, Math.round((val/meta)*100));
+    const valores = porLinha[name] || [];
+    const perc = valores.length > 0
+      ? Math.round(valores.reduce((a,v)=>a+v,0) / valores.length)
+      : null;
     return { name, perc };
-  }).sort((a,b)=>b.perc-a.perc); // melhor primeiro (padrão de gráfico de Pareto)
+  });
+
+  const comDado = dados.filter(d => d.perc !== null).sort((a,b)=>b.perc-a.perc);
+
+  if(comDado.length === 0){
+    el.innerHTML = `<div class="pareto-empty">Ainda sem dado de OEE hoje pra nenhuma linha.</div>`;
+    return;
+  }
 
   const W = 640, H = 260, padL = 44, padR = 44, padT = 26, padB = 40;
   const chartW = W - padL - padR;
   const chartH = H - padT - padB;
-  const n = dados.length;
+  const n = comDado.length;
   const slot = chartW / n;
   const barW = slot * 0.5;
 
-  const bars = dados.map((d,i)=>{
+  const bars = comDado.map((d,i)=>{
     const x = padL + i*slot + (slot-barW)/2;
     const barH = (d.perc/100)*chartH;
     const y = padT + chartH - barH;
@@ -826,7 +872,49 @@ document.querySelectorAll('.period-btn').forEach(btn=>{
 });
 
 
+// ---------------- HISTÓRICO REAL (tabelas stops / oee_hourly) ----------------
+// Essas duas tabelas são alimentadas pelo sync.js direto do EGA (MOVIMENTACAO
+// e OEE_HORARIO) — diferente da tabela "machines", aqui os nomes de máquina
+// sempre vêm no nosso próprio padrão ("Dosadora 1", "Plissadeira 1"...),
+// então não sofrem do problema de nomenclatura que quebrava os filtros antes.
+let liveStops = [];
+let liveOeeHourly = [];
+
+function inicioDoDiaISO(){
+  const d = new Date();
+  d.setHours(0,0,0,0);
+  return d.toISOString();
+}
+
+async function carregarHistoricoReal(){
+  try{
+    const desde = inicioDoDiaISO();
+
+    const stopsResp = await supabaseClient
+      .from('stops')
+      .select('*')
+      .gte('started_at', desde)
+      .order('started_at', { ascending:false });
+    if(!stopsResp.error) liveStops = stopsResp.data || [];
+
+    const oeeResp = await supabaseClient
+      .from('oee_hourly')
+      .select('*')
+      .gte('ts_hour', desde)
+      .order('ts_hour', { ascending:false });
+    if(!oeeResp.error) liveOeeHourly = oeeResp.data || [];
+  } catch(err){
+    console.error('Erro ao carregar histórico real (stops/oee_hourly):', err.message);
+  }
+
+  renderParetoList();
+  renderOeeByLine();
+}
+
 function initParetoFilters(){
+  // Estrutura fixa e conhecida da fábrica (não depende dos nomes que vêm do
+  // Supabase, que podem estar em outro padrão dependendo de quem alimentou
+  // a tabela "machines") — assim o filtro nunca fica vazio por engano.
   const linhaSel = document.getElementById('pareto-linha-filter');
   linhaSel.innerHTML = Object.keys(lineTargets).map(l => `<option value="${l}">${l}</option>`).join('');
   onParetoLinhaChange();
@@ -835,12 +923,10 @@ function initParetoFilters(){
 function onParetoLinhaChange(){
   const linha = document.getElementById('pareto-linha-filter').value;
   const maquinaSel = document.getElementById('pareto-maquina-filter');
-  const temDosadora = machines.some(m => m.line === linha && m.id.startsWith('Dosadora'));
-  const temPlissadeira = machines.some(m => m.line === linha && m.id.startsWith('Plissadeira'));
+  const temPlissadeira = linha !== 'Linha 5'; // só a Linha 5 não tem Plissadeira
 
-  const opcoes = [];
-  if(temDosadora && temPlissadeira) opcoes.push({ value:'todas', label:'Dosadora + Plissadeira' });
-  if(temDosadora) opcoes.push({ value:'Dosadora', label:'Dosadora' });
+  const opcoes = [{ value:'todas', label: temPlissadeira ? 'Dosadora + Plissadeira' : 'Dosadora' }];
+  opcoes.push({ value:'Dosadora', label:'Dosadora' });
   if(temPlissadeira) opcoes.push({ value:'Plissadeira', label:'Plissadeira' });
 
   maquinaSel.innerHTML = opcoes.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
@@ -850,33 +936,46 @@ function onParetoLinhaChange(){
 function renderParetoList(){
   const linhaSel = document.getElementById('pareto-linha-filter');
   const maquinaSel = document.getElementById('pareto-maquina-filter');
-  if(!linhaSel.value || !maquinaSel.value) return; // filtros ainda não inicializados
+  if(!linhaSel || !linhaSel.value || !maquinaSel.value) return; // filtros ainda não inicializados
 
   const linha = linhaSel.value;
   const maquinaFiltro = maquinaSel.value;
   const el = document.getElementById('pareto-list');
 
-  let stops = stopLog.filter(s => s.line === linha);
+  let stops = liveStops.filter(s => s.line === linha);
   if(maquinaFiltro !== 'todas'){
-    stops = stops.filter(s => s.machine.startsWith(maquinaFiltro));
+    stops = stops.filter(s => (s.machine_id || '').startsWith(maquinaFiltro));
   }
-  stops = stops.slice().sort((a,b)=>b.minutes-a.minutes);
 
-  if(stops.length === 0){
+  // Agrupa por motivo (Pareto de verdade: motivo x tempo total parado hoje)
+  const porMotivo = {};
+  stops.forEach(s => {
+    const motivo = s.reason || 'Motivo não informado';
+    const minutos = s.duration_min != null
+      ? s.duration_min
+      : Math.max(0, Math.round((Date.now() - new Date(s.started_at).getTime()) / 60000)); // ainda em andamento
+    porMotivo[motivo] = (porMotivo[motivo] || 0) + minutos;
+  });
+
+  const agrupado = Object.entries(porMotivo)
+    .map(([reason, minutes]) => ({ reason, minutes }))
+    .sort((a,b) => b.minutes - a.minutes);
+
+  if(agrupado.length === 0){
     el.innerHTML = `<div class="pareto-empty">Nenhuma parada registrada hoje para essa seleção.</div>`;
     return;
   }
 
-  const max = Math.max(...stops.map(s=>s.minutes));
-  const total = stops.reduce((a,s)=>a+s.minutes,0);
+  const max = Math.max(...agrupado.map(s=>s.minutes));
+  const total = agrupado.reduce((a,s)=>a+s.minutes,0);
 
   el.innerHTML = `
     <div class="pareto-line-group">
       <div class="pareto-line-head"><span>${linha}${maquinaFiltro!=='todas' ? ' · '+maquinaFiltro : ''}</span><span>${total} min parada</span></div>
-      ${stops.map(s => `
+      ${agrupado.map(s => `
         <div class="pareto-item">
           <div class="pareto-fill-wrap">
-            <div class="pareto-name"><span>${s.reason} <small>(${s.machine})</small></span><span>${s.minutes} min</span></div>
+            <div class="pareto-name"><span>${s.reason}</span><span>${s.minutes} min</span></div>
             <div class="pareto-track"><div class="pareto-fill" style="width:${(s.minutes/max*100).toFixed(0)}%"></div></div>
           </div>
         </div>
@@ -1023,5 +1122,17 @@ renderRelatorios();
 renderAll();
 
 carregarMaquinas();
+carregarHistoricoReal();
 
 setInterval(carregarMaquinas, 5000);
+setInterval(carregarHistoricoReal, 60000); // histórico não precisa ser tão frequente
+
+// Navegadores reduzem/pausam o setInterval quando a aba fica em segundo
+// plano por muito tempo (ex: minimizada, tela bloqueada). Isso faz a
+// atualização parecer "travada" mesmo sem nenhum erro no código. Esses
+// dois listeners forçam uma atualização assim que a aba volta a ficar
+// visível/em foco, recuperando o painel sozinho.
+document.addEventListener('visibilitychange', () => {
+  if(!document.hidden){ carregarMaquinas(); carregarHistoricoReal(); }
+});
+window.addEventListener('focus', () => { carregarMaquinas(); carregarHistoricoReal(); });

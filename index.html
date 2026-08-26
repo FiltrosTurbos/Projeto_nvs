@@ -83,7 +83,7 @@
       </div>
       <div class="kpi-card" style="--accent: var(--setup)">
         <div class="kpi-label">Em Setup</div>
-        <div class="kpi-value">1 <span class="kpi-unit">/ 10</span></div>
+        <div class="kpi-value" id="kpi-setup">0 <span class="kpi-unit">/ 10</span></div>
         <div class="kpi-foot">Troca de ferramenta em andamento</div>
       </div>
       <div class="kpi-card" style="--accent: var(--info)">
@@ -108,26 +108,9 @@
 
       <div class="panel">
         <div class="panel-head">
-          <div class="panel-title">Alertas Recentes<small>Paradas e eventos da última hora</small></div>
+          <div class="panel-title">Alertas Recentes<small>Últimas paradas registradas hoje</small></div>
         </div>
-        <div class="alert-list">
-          <div class="alert-item">
-            <span class="alert-time">10:42</span>
-            <div class="alert-body"><b>Dosadora 2 · Linha 2</b><p>Parada por falta de matéria-prima</p></div>
-          </div>
-          <div class="alert-item">
-            <span class="alert-time">10:15</span>
-            <div class="alert-body"><b>Plissadeira 3 · Linha 3</b><p>Falha mecânica — manutenção acionada</p></div>
-          </div>
-          <div class="alert-item warn">
-            <span class="alert-time">09:58</span>
-            <div class="alert-body"><b>Dosadora 4 · Linha 4</b><p>Setup de troca de OP iniciado</p></div>
-          </div>
-          <div class="alert-item">
-            <span class="alert-time">09:30</span>
-            <div class="alert-body"><b>Dosadora 5 · Linha 5</b><p>Parada — aguardando operador</p></div>
-          </div>
-        </div>
+        <div class="alert-list" id="alert-list"></div>
       </div>
     </div>
   </section>

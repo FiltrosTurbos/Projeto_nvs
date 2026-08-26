@@ -147,6 +147,17 @@ const ALARM_REASONS = ['PARADA A DEFINIR', 'MOT.INDETERMINADO'];
 function needsAlarm(m){ return m.status === 'stop' && (!m.reason || ALARM_REASONS.includes(m.reason)); }
 function isStopped(m){ return m.status === 'stop'; }
 
+// O EGA não manda um status separado pra "em setup" — setup é uma parada
+// (status='stop') com o motivo "SETUP" (código 999 na tabela PARADAS de lá).
+// Então tratamos como setup sempre que o motivo bater com isso — e mantemos
+// a checagem por status==='setup' também, só pra não quebrar o dado mock
+// que ainda usa esse valor direto.
+function isSetup(m){ return m.status === 'setup' || (m.status === 'stop' && m.reason === 'SETUP'); }
+
+// Status pra fins de exibição (LED, badge, texto) — trata "parada por SETUP"
+// visualmente como setup, mesmo com m.status ainda sendo 'stop' por baixo.
+function displayStatus(m){ return isSetup(m) ? 'setup' : m.status; }
+
 // ---------------- ALARME SONORO ----------------
 // Toca um bipe curto via Web Audio API (não depende de nenhum arquivo de áudio).
 // O AudioContext só pode ser criado/retomado após uma interação do usuário
@@ -226,11 +237,11 @@ function renderDashboardGrid(){
           <div class="m-name">${m.id}</div>
           <div class="m-line">${m.line}</div>
         </div>
-        <div class="led ${m.status}"></div>
+        <div class="led ${displayStatus(m)}"></div>
       </div>
-      <span class="m-status-tag ${statusTagClass[m.status]}">${statusLabel[m.status]}</span>
+      <span class="m-status-tag ${statusTagClass[displayStatus(m)]}">${statusLabel[displayStatus(m)]}</span>
       <div class="m-op">${m.op || '—'}</div>
-      ${m.status !== 'setup' ? `
+      ${!isSetup(m) ? `
         <div class="progress-bar"><div class="progress-fill" style="width:${pct(m)}%; background:${m.status==='stop' ? 'var(--stop)' : 'var(--info)'}"></div></div>
         <div class="m-qty">${m.produced.toLocaleString('pt-BR')} / ${m.target.toLocaleString('pt-BR')} pçs</div>
       ` : `<div class="m-qty">Troca de ferramenta</div>`}
@@ -241,10 +252,11 @@ function renderDashboardGrid(){
 
 function updateDashboardKPIs(){
   const rodando = machines.filter(m=>m.status==='run').length;
-  const paradas = machines.filter(m=>m.status==='stop').length;
-  const setup = machines.filter(m=>m.status==='setup').length;
+  const setup = machines.filter(m=>isSetup(m)).length;
+  const paradas = machines.filter(m=>m.status==='stop' && !isSetup(m)).length;
   document.getElementById('kpi-rodando').innerHTML = `${rodando} <span class="kpi-unit">/ ${machines.length}</span>`;
   document.getElementById('kpi-paradas').innerHTML = `${paradas} <span class="kpi-unit">/ ${machines.length}</span>`;
+  document.getElementById('kpi-setup').innerHTML = `${setup} <span class="kpi-unit">/ ${machines.length}</span>`;
   const lines = lineProduction();
   const totalProd = Object.values(lines).reduce((a,v)=>a+v,0);
   document.getElementById('kpi-prod').textContent = totalProd.toLocaleString('pt-BR');
@@ -269,9 +281,9 @@ function renderMachinePicker(){
           <div class="m-name">${m.id}</div>
           <div class="m-line">${m.line}</div>
         </div>
-        <div class="led ${m.status}"></div>
+        <div class="led ${displayStatus(m)}"></div>
       </div>
-      <span class="m-status-tag ${statusTagClass[m.status]}">${needsAlarm(m) ? '🚨 ' + (m.reason || 'Motivo indefinido') : statusLabel[m.status]}</span>
+      <span class="m-status-tag ${statusTagClass[displayStatus(m)]}">${needsAlarm(m) ? '🚨 ' + (m.reason || 'Motivo indefinido') : statusLabel[displayStatus(m)]}</span>
     </div>
   `).join('');
 }
@@ -314,7 +326,7 @@ function renderOpDetail(){
         <h3>${m.id}</h3>
         <div class="m-line">${m.line} · Operador: ${m.operator}</div>
       </div>
-      <div class="op-status-badge ${statusBadgeClass[m.status]}">${statusLabel[m.status]}</div>
+      <div class="op-status-badge ${statusBadgeClass[displayStatus(m)]}">${statusLabel[displayStatus(m)]}</div>
     </div>
 
     <div class="op-info-grid">
@@ -362,7 +374,7 @@ function renderOpDetail(){
           <div class="since">Parada desde ${m.since}</div>
         </div>
       </div>
-    ` : m.status === 'setup' ? `
+    ` : isSetup(m) ? `
       <div class="stop-reason-box" style="background: var(--setup-dim); border-color: rgba(245,185,61,0.4);">
         <div class="ico">🔧</div>
         <div>
@@ -909,6 +921,32 @@ async function carregarHistoricoReal(){
 
   renderParetoList();
   renderOeeByLine();
+  renderAlertasRecentes();
+}
+
+// "Alertas Recentes" do Dashboard — últimas paradas registradas hoje,
+// direto da tabela stops (mesma fonte usada no Supervisor).
+function renderAlertasRecentes(){
+  const el = document.getElementById('alert-list');
+  if(!el) return;
+
+  const recentes = liveStops.slice(0, 6); // já vem ordenado do mais recente pro mais antigo
+
+  if(recentes.length === 0){
+    el.innerHTML = `<div class="pareto-empty">Nenhuma parada registrada hoje ainda.</div>`;
+    return;
+  }
+
+  el.innerHTML = recentes.map(s => {
+    const hora = new Date(s.started_at).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
+    const isSetupAlert = (s.reason || '').toUpperCase().includes('SETUP');
+    return `
+      <div class="alert-item ${isSetupAlert ? 'warn' : ''}">
+        <span class="alert-time">${hora}</span>
+        <div class="alert-body"><b>${s.machine_id} · ${s.line}</b><p>${s.reason || 'Motivo não informado'}</p></div>
+      </div>
+    `;
+  }).join('');
 }
 
 function initParetoFilters(){
